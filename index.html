@@ -137,9 +137,7 @@ const TIER_NC_AVG_THRESHOLD=70;
 const TIER_NC_CAREER_MIN=25;
 function priceTier(price, playerName, careerGames, seasonAvg, isRookie){
   if(price>=TIER_PREMIUM_MIN) return "PREMIUM";
-  // ROOKIE: first-year player only (no 2024/2025 games recorded)
   if(isRookie===true || (careerGames!=null && careerGames<=8)) return "ROOKIE";
-  // NC: experienced player (≥20 career games) at low-mid price with poor scoring
   const NC_CAREER=20, NC_PRICE=660000, NC_AVG=72;
   if(careerGames!=null && careerGames>=NC_CAREER && price<=NC_PRICE && (seasonAvg||0)<NC_AVG)
     return "NC";
@@ -149,7 +147,7 @@ function priceTier(price, playerName, careerGames, seasonAvg, isRookie){
   return "MID";
 }
 
-function tierLabel(t){return t==="PREMIUM"?"Premium":t==="ROOKIE"?"Rookie/Cash":"Mid-pricer";}
+function tierLabel(t){return t==="PREMIUM"?"Premium":t==="ROOKIE"?"Rookie/Cash":t==="NC"?"Non-Contrib":"Mid-pricer";}
 function tierClass(t){return t==="PREMIUM"?"tier-prem":t==="ROOKIE"?"tier-rook":"tier-mid";}
 
 function dvpColor(v){if(v>=0.6)return"#22c55e";if(v>=0.15)return"#86efac";if(v>=-0.15)return"#94a3b8";if(v>=-0.6)return"#fca5a5";return"#ef4444"}
@@ -988,15 +986,39 @@ function mergeImports(beResult, scoreResult, existingPlayers){
     MAGIC_NUMBER=MN_TABLE[CURRENT_ROUND]!=null?MN_TABLE[CURRENT_ROUND]:MAGIC_NUMBER;
   }
 
-  // ── 4. Career-games / rookie detection from ALL years in hist ──────────
-  // (first-year players have zero games in any year before 2026; "career
-  //  games" feeds the PREMIUM/MID/ROOKIE/NC tier classification.)
+  // ── 4. Career-games / rookie detection ──────────────────────────────────
+  // Build a seed lookup: careerGames and isRookie were computed correctly
+  // in Python from all 3 years (2024+2025+2026). We use that as the
+  // authoritative source. The uploaded scores CSV typically only has 2026
+  // data, so counting pre-2026 rows from hist would incorrectly mark every
+  // player as a first-year player and collapse all NC/MID into ROOKIE.
+  const seedCareerGames={}, seedIsRookie={};
+  for(const sp of SEED_PLAYERS){
+    if(sp.name){
+      seedCareerGames[sp.name]=sp.careerGames!=null?sp.careerGames:(sp.games||0);
+      seedIsRookie[sp.name]=sp.isRookie===true;
+    }
+  }
   const careerGames={}, isFirstYear={};
   for(const name in hist){
     const games=hist[name];
-    const pre2026=games.filter(g=>g.year<2026).length;
-    careerGames[name]=games.length;
-    isFirstYear[name]=pre2026===0;
+    // How many pre-2026 rows exist in the uploaded data?
+    const pre2026inUpload=games.filter(g=>g.year<2026).length;
+    // If the upload contains pre-2026 data, use it directly.
+    // Otherwise fall back to the seed's value (the safe default).
+    const seedCG=seedCareerGames[name];
+    if(pre2026inUpload>0){
+      careerGames[name]=games.length;
+      isFirstYear[name]=pre2026inUpload===0;
+    } else if(seedCG!=null){
+      // Seed has accurate career total from all 3 years of offline data
+      careerGames[name]=seedCG;
+      isFirstYear[name]=seedIsRookie[name]===true;
+    } else {
+      // No seed data either — conservative: treat as experienced if >8 games in upload
+      careerGames[name]=games.length;
+      isFirstYear[name]=games.length<=8;
+    }
   }
 
   // ── 5. Rebuild the CB/KI/TOG round-by-round matrix from 2026 data ──────
@@ -1049,6 +1071,14 @@ function mergeImports(beResult, scoreResult, existingPlayers){
     rec.dpp=dpp&&dpp.length?dpp:[pos.split("/")[0]];
     rec.roundsOut=roundsOut;
     rec.histRunAvg=histRunAvg!=null?Math.round(histRunAvg*10)/10:null;
+    // Explicitly set tier now that careerGames and isRookie are known.
+    // computePlayerModel reads p.tier if set, so this overrides the price-only fallback.
+    rec.tier=priceTier(rec.price, rec.name, rec.careerGames, rec.seasonAvg, rec.isRookie);
+    // priceChangeSig: positive = above BE this round (price rising)
+    const recL3=rec.scores&&rec.scores.length>=3
+      ?mean(rec.scores.slice(-3))
+      :(rec.seasonAvg||0);
+    rec.priceChangeSig=Math.round((recL3-(rec.breakeven||0))*10)/10;
     return rec;
   }
 
@@ -3882,6 +3912,7 @@ function sbCheckAutoSave(){
    ============================================================
 
    -- 1. Teams table (stores each user's team JSON)
+   -- Run this to fix the teams table RLS (drop old policy first if exists):
    create table if not exists teams (
      id         uuid primary key default gen_random_uuid(),
      user_id    uuid references auth.users not null unique,
@@ -3889,10 +3920,13 @@ function sbCheckAutoSave(){
      updated_at timestamptz default now()
    );
    alter table teams enable row level security;
-   create policy "Users own their team"
-     on teams for all
-     using (auth.uid() = user_id)
-     with check (auth.uid() = user_id);
+   -- Drop old policy if it exists (handles partial setups)
+   drop policy if exists "Users own their team" on teams;
+   -- Separate policies per operation are more reliable than "for all"
+   create policy "team_select" on teams for select using (auth.uid() = user_id);
+   create policy "team_insert" on teams for insert with check (auth.uid() = user_id);
+   create policy "team_update" on teams for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+   create policy "team_delete" on teams for delete using (auth.uid() = user_id);
 
    -- 2. Storage bucket (stores weekly CSV data files)
    -- In Supabase Dashboard → Storage → New bucket:
