@@ -107,7 +107,7 @@ textarea.csv{width:100%;min-height:140px;background:#0a0f1e;border:1px solid #33
 <div id="app">
   <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:16px">
     <div style="width:44px;height:44px;border:3px solid #1e293b;border-top-color:#fbbf24;border-radius:50%;animation:spin 0.9s linear infinite"></div>
-    <div style="color:#64748b;font-size:14px">Loading v4…</div>
+    <div style="color:#64748b;font-size:14px">Loading AFL Fantasy v5…</div>
   </div>
 </div>
 <script>
@@ -4558,6 +4558,16 @@ function renderOptimalTeam(){
     +'</table></div>'
   +'</div>';
 }
+
+
+// ============================================================
+// BOOT — this must be the last code in the script block
+// sbInit() owns loadSeedData() + render() synchronously first,
+// then async Supabase session check in the background.
+// mountChat() mounts the AI assistant FAB after boot.
+// ============================================================
+sbInit(); // owns loadSeedData() + render() internally
+mountChat();
 
 </script>
 </body>
